@@ -126,6 +126,7 @@
       <StackReserveSize>4194304</StackReserveSize>
       <HeapReserveSize>
       </HeapReserveSize>
+      <AdditionalDependencies>cudart.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -145,6 +146,7 @@
       <StackReserveSize>4194304</StackReserveSize>
       <HeapReserveSize>
       </HeapReserveSize>
+      <AdditionalDependencies>cudart.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <CudaCompile>
       <TargetMachinePlatform>64</TargetMachinePlatform>
