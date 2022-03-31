@@ -11,28 +11,35 @@
 #include <concurrencysal.h>
 #include <ppl.h>
 #include <string>
+#include <device_launch_parameters.h>
 
 using namespace concurrency;
 using namespace std;
 
+
 const float boxsize = 10.f;
-const int npoints = 2000;
+const int npoints = 1024; //GPU parallel broken past 1025 points.
 const int to_possibilites = (npoints - 2) * (npoints - 1) / 2;
 const int distarr_n = npoints * (npoints - 1) / 2;
 FILE *fp = NULL;
 FILE *gnupipe = NULL;
 
 int variables[to_possibilites][2];
+int variablesi[to_possibilites];
+int variablesk[to_possibilites];
+float results[to_possibilites];
 
 struct point {
 	float x, y;
 	int number;
 };
 point List[npoints];
+float Listx[npoints];
+float Listy[npoints];
 float distmatrix[npoints][npoints];
 float vnnmatrix[npoints][npoints];
 
-float distarray[distarr_n];
+float distarray[npoints * npoints];
 float bestdist = FLT_MAX;
 
 int Path[npoints + 1];
@@ -59,8 +66,12 @@ void PrintMatrix() {
 }
 
 void RandomCoordinate(point * a, int number) {
-	a->x = boxsize * (float)rand() / (RAND_MAX);
-	a->y = boxsize * (float)rand() / (RAND_MAX);
+	float x = boxsize * (float)rand() / (RAND_MAX);
+	float y = boxsize * (float)rand() / (RAND_MAX);
+	Listx[number] = x;
+	Listy[number] = y;
+	a->x = x;
+	a->y = y;
 	a->number = number;
 }
 
@@ -96,6 +107,8 @@ void FillVariables() {
 		for (int k = i + 1; k < npoints; k++) {
 			variables[j][0] = i;
 			variables[j][1] = k;
+			variablesi[j] = i;
+			variablesk[j] = k;
 			j++;
 		}
 	}
@@ -121,14 +134,14 @@ void MakeDistMatrix() {
 		for (int j = 0; j < npoints; j++) {
 			if (i == j) {
 				distmatrix[i][j] = FLT_MAX;
+				distarray[f] = FLT_MAX;
+				f++;
 			}	
 			else {
 				float dist = CalcDist(List[i], List[j]);
 				distmatrix[i][j] = dist;
-				if (i < j) {
-					distarray[f] = dist;
-					f++;
-				}	
+				distarray[f] = dist;
+				f++;	
 			}
 		}
 	}
@@ -264,7 +277,7 @@ void IHC_parallel() {
 				BestNewDist = dist;
 			}
 
-			});
+		});
 
 		if (BestNewDist != FLT_MAX) {
 			two_opt(bestvalue[0], bestvalue[1]);
@@ -278,12 +291,110 @@ void IHC_parallel() {
 	}
 }
 
+__global__ void GPU_parallel(int* Path, int N, float* results, float bestdist, float* distmatrix, int* variablesi, int* variablesk) {
+	int row = blockIdx.y * blockDim.y + threadIdx.y;
+	int col = blockIdx.x * blockDim.x + threadIdx.x;
+	int index = row * N + col;
+
+	results[index] = bestdist - distmatrix[Path[variablesi[index] -1] * N + Path[variablesi[index]]] - distmatrix[Path[variablesk[index]] * N + Path[variablesk[index] + 1]];
+	results[index] += distmatrix[Path[variablesi[index] - 1] * N + Path[variablesk[index]]] + distmatrix[Path[variablesi[index]] * N + Path[variablesk[index] + 1]];
+}
+
+void IHC_CUDA() {
+	
+
+
+	size_t bytes_matrix = npoints * npoints * sizeof(float);
+	size_t bytes_list = npoints * sizeof(float);
+	size_t bytes_variables = to_possibilites * sizeof(int);
+	size_t bytes_path = (npoints + 1) * sizeof(int);
+	size_t bytes_float = sizeof(float);
+
+	float* d_matrix, * d_listx, * d_listy, *d_results;
+	int* d_variablesi, * d_variablesk;
+	float d_bestdist;
+	cudaMalloc(&d_matrix, bytes_matrix);
+	cudaMalloc(&d_listx, bytes_list);
+	cudaMalloc(&d_listy, bytes_list);
+	cudaMalloc(&d_variablesi, bytes_variables);
+	cudaMalloc(&d_variablesk, bytes_variables);
+	cudaMalloc(&d_results, bytes_variables);
+	
+
+	int THREADS = npoints - 1;
+
+	int BLOCKS = to_possibilites / THREADS;
+
+	dim3 threads(THREADS, THREADS);
+	dim3 blocks(BLOCKS, BLOCKS);
+
+	cudaMemcpy(d_matrix, distarray, bytes_matrix, cudaMemcpyHostToDevice);
+	cudaMemcpy(d_listx, Listx, bytes_list, cudaMemcpyHostToDevice);
+	cudaMemcpy(d_listy, Listy, bytes_list, cudaMemcpyHostToDevice);
+	cudaMemcpy(d_variablesi, variablesi, bytes_variables, cudaMemcpyHostToDevice);
+	cudaMemcpy(d_variablesk, variablesk, bytes_variables, cudaMemcpyHostToDevice);
+	cudaMemcpy(d_results, results, bytes_variables, cudaMemcpyHostToDevice);
+
+	int* d_Path;
+	cudaMalloc(&d_Path, bytes_path);
+
+	int j = 0;
+	while (j < 500) {
+		int BestNewPath[npoints + 1];
+		float BestNewDist = FLT_MAX;
+		int bestvaluei;
+		int bestvaluek;
+
+		
+		//const clock_t begin2 = clock();
+		
+		cudaMemcpy(d_Path, Path, bytes_path, cudaMemcpyHostToDevice);
+		
+		GPU_parallel<<<BLOCKS, THREADS>>>(d_Path, npoints, d_results, bestdist, d_matrix, d_variablesi, d_variablesk);
+		
+		cudaMemcpy(results, d_results, bytes_variables, cudaMemcpyDeviceToHost);
+		
+		//cout << "\nTime taken for " << npoints << " in linear: " << float(clock() - begin2) / CLOCKS_PER_SEC;
+
+		float* bestvalue = std::min_element(std::begin(results), std::end(results));
+		int bestindex =  std::distance(std::begin(results), bestvalue);
+
+		if (bestvalue[0] < bestdist) {
+			two_opt(variablesi[bestindex], variablesk[bestindex]);
+			bestdist = bestvalue[0];
+		}
+		else {
+			cout << " done" << " " << j;
+			break;
+		}
+
+		j++;
+	}
+
+	cudaFree(d_matrix);
+	cudaFree(d_listx);
+	cudaFree(d_listy);
+	cudaFree(d_variablesi);
+	cudaFree(d_variablesk);
+	cudaFree(d_results);
+
+	cudaFree(d_Path);
+}
+
+
+
+
 
 int main() {
+	
 	//init();
 	PopulateList();
+	
+	
 	MakeDistMatrix();
 
+
+	
 	//Graph();
 	//bestdist = CalcDistPath(Path);
 	vnn(List);
@@ -295,15 +406,26 @@ int main() {
 	const clock_t begin = clock();
 	IHC();
 	cout << "\nTime taken for " << npoints << " in linear: " << float(clock() - begin) / CLOCKS_PER_SEC;
-	//IHCGraph();
-
+	IHCGraph();
 	
-	// PARALLEL
+	
+	// PARALLEL CPU
 	vnn(List);
 	bestdist = CalcDistPath3(Path);
-	const clock_t begin3 = clock();
+	const clock_t begin2 = clock();
 	IHC_parallel();
-	cout << "\nTime taken for " << npoints << " in parallel2: " << float(clock() - begin3) / CLOCKS_PER_SEC;
+	cout << "\nTime taken for " << npoints << " in CPU parallel: " << float(clock() - begin2) / CLOCKS_PER_SEC;
+	IHCGraph();
+	
+
+	
+	// PRALLEL GPU
+	vnn(List);
+	bestdist = CalcDistPath3(Path);
+
+	const clock_t begin3 = clock();
+	IHC_CUDA();
+	cout << "\nTime taken for " << npoints << " in GPU parallel: " << float(clock() - begin3) / CLOCKS_PER_SEC;
 	IHCGraph();
 	
 }
