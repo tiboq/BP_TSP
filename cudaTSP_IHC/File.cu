@@ -12,13 +12,21 @@
 #include <ppl.h>
 #include <string>
 #include <device_launch_parameters.h>
+#include <thrust/device_vector.h>
+#include <thrust/device_ptr.h>
+#include <thrust/extrema.h>
+#include <cublas_v2.h>
+#ifdef __INTELLISENSE__
+#include "intellisense_cuda_intrinsics.h"
+#endif
+
 
 using namespace concurrency;
 using namespace std;
 
 
 const float boxsize = 10.f;
-const int npoints = 1024; //GPU parallel broken past 1025 points.
+const int npoints = 2500; //GPU parallel broken past 1025 points.
 const int to_possibilites = (npoints - 2) * (npoints - 1) / 2;
 const int distarr_n = npoints * (npoints - 1) / 2;
 FILE *fp = NULL;
@@ -224,6 +232,18 @@ void vnn(point points[]) {
 
 }
 
+int GetThreadcount() {
+	if (npoints < 1025) {
+		return (npoints - 1);
+	} 
+	else {
+		for (int i = 1024; i > 1; i--) {
+			if ((to_possibilites % i) == 0) return i;
+		}
+	}
+}
+
+
 
 void IHC() {
 	int j = 0;
@@ -291,28 +311,31 @@ void IHC_parallel() {
 	}
 }
 
+
+
 __global__ void GPU_parallel(int* Path, int N, float* results, float bestdist, float* distmatrix, int* variablesi, int* variablesk) {
 	int row = blockIdx.y * blockDim.y + threadIdx.y;
 	int col = blockIdx.x * blockDim.x + threadIdx.x;
 	int index = row * N + col;
 
-	results[index] = bestdist - distmatrix[Path[variablesi[index] -1] * N + Path[variablesi[index]]] - distmatrix[Path[variablesk[index]] * N + Path[variablesk[index] + 1]];
-	results[index] += distmatrix[Path[variablesi[index] - 1] * N + Path[variablesk[index]]] + distmatrix[Path[variablesi[index]] * N + Path[variablesk[index] + 1]];
+	float dist = bestdist - distmatrix[Path[variablesi[index] - 1] * N + Path[variablesi[index]]] - distmatrix[Path[variablesk[index]] * N + Path[variablesk[index] + 1]];
+	dist += distmatrix[Path[variablesi[index] - 1] * N + Path[variablesk[index]]] + distmatrix[Path[variablesi[index]] * N + Path[variablesk[index] + 1]];
+	results[index] = dist;
+
 }
 
 void IHC_CUDA() {
-	
-
+	const int THREADS = GetThreadcount();
+	const int BLOCKS = to_possibilites / THREADS;
 
 	size_t bytes_matrix = npoints * npoints * sizeof(float);
 	size_t bytes_list = npoints * sizeof(float);
 	size_t bytes_variables = to_possibilites * sizeof(int);
 	size_t bytes_path = (npoints + 1) * sizeof(int);
-	size_t bytes_float = sizeof(float);
+	size_t bytes_results2 = BLOCKS * sizeof(float);
 
 	float* d_matrix, * d_listx, * d_listy, *d_results;
 	int* d_variablesi, * d_variablesk;
-	float d_bestdist;
 	cudaMalloc(&d_matrix, bytes_matrix);
 	cudaMalloc(&d_listx, bytes_list);
 	cudaMalloc(&d_listy, bytes_list);
@@ -320,11 +343,6 @@ void IHC_CUDA() {
 	cudaMalloc(&d_variablesk, bytes_variables);
 	cudaMalloc(&d_results, bytes_variables);
 	
-
-	int THREADS = npoints - 1;
-
-	int BLOCKS = to_possibilites / THREADS;
-
 	dim3 threads(THREADS, THREADS);
 	dim3 blocks(BLOCKS, BLOCKS);
 
@@ -338,27 +356,22 @@ void IHC_CUDA() {
 	int* d_Path;
 	cudaMalloc(&d_Path, bytes_path);
 
+	cublasHandle_t cublasHandle;
+	cublasStatus_t cublasStatus = cublasCreate(&cublasHandle);
+
 	int j = 0;
 	while (j < 500) {
-		int BestNewPath[npoints + 1];
-		float BestNewDist = FLT_MAX;
-		int bestvaluei;
-		int bestvaluek;
 
-		
-		//const clock_t begin2 = clock();
 		
 		cudaMemcpy(d_Path, Path, bytes_path, cudaMemcpyHostToDevice);
+
+		GPU_parallel<<<BLOCKS, THREADS>>>(d_Path, npoints, d_results, bestdist, d_matrix, d_variablesi, d_variablesk);	
 		
-		GPU_parallel<<<BLOCKS, THREADS>>>(d_Path, npoints, d_results, bestdist, d_matrix, d_variablesi, d_variablesk);
-		
+		/*
 		cudaMemcpy(results, d_results, bytes_variables, cudaMemcpyDeviceToHost);
-		
-		//cout << "\nTime taken for " << npoints << " in linear: " << float(clock() - begin2) / CLOCKS_PER_SEC;
-
 		float* bestvalue = std::min_element(std::begin(results), std::end(results));
-		int bestindex =  std::distance(std::begin(results), bestvalue);
-
+		int bestindex = std::distance(std::begin(results), bestvalue);
+		
 		if (bestvalue[0] < bestdist) {
 			two_opt(variablesi[bestindex], variablesk[bestindex]);
 			bestdist = bestvalue[0];
@@ -367,7 +380,39 @@ void IHC_CUDA() {
 			cout << " done" << " " << j;
 			break;
 		}
+		
+		
+		thrust::device_ptr<float> g_ptr = thrust::device_pointer_cast(d_results);
+		int bestindex = thrust::min_element(g_ptr, g_ptr + to_possibilites) - g_ptr;
+		float bestvalue = *(g_ptr + bestindex);
 
+		if (bestvalue < bestdist) {
+			two_opt(variablesi[bestindex], variablesk[bestindex]);
+			bestdist = bestvalue;
+		}
+		else {
+			cout << " done" << " " << j;
+			break;
+		}
+		*/
+
+
+		int index = 0;
+		cublasIsamin(cublasHandle, to_possibilites, d_results, 1, &index);
+		index--;
+
+		float dist = bestdist - distarray[Path[variablesi[index] - 1] * npoints + Path[variablesi[index]]] - distarray[Path[variablesk[index]] * npoints + Path[variablesk[index] + 1]];
+		dist += distarray[Path[variablesi[index] - 1] * npoints + Path[variablesk[index]]] + distarray[Path[variablesi[index]] * npoints + Path[variablesk[index] + 1]];
+
+		if (dist < bestdist) {
+			two_opt(variablesi[index], variablesk[index]);
+			bestdist = dist;
+		}
+		else {
+			cout << " done" << " " << j;
+			break;
+		}
+		
 		j++;
 	}
 
@@ -377,7 +422,6 @@ void IHC_CUDA() {
 	cudaFree(d_variablesi);
 	cudaFree(d_variablesk);
 	cudaFree(d_results);
-
 	cudaFree(d_Path);
 }
 
@@ -400,6 +444,7 @@ int main() {
 	vnn(List);
 	//VNNGraph();
 	FillVariables();
+	
 	
 	// LINEAR
 	bestdist = CalcDistPath3(Path);
