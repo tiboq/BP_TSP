@@ -12,9 +12,6 @@
 #include <ppl.h>
 #include <string>
 #include <device_launch_parameters.h>
-#include <thrust/device_vector.h>
-#include <thrust/device_ptr.h>
-#include <thrust/extrema.h>
 #include <cublas_v2.h>
 #ifdef __INTELLISENSE__
 #include "intellisense_cuda_intrinsics.h"
@@ -25,8 +22,8 @@ using namespace concurrency;
 using namespace std;
 
 
-const float boxsize = 10.f;
-const int npoints = 2500; //GPU parallel broken past 1025 points.
+const float boxsize = 100.f;
+const int npoints = 500; //GPU parallel broken past 1025 points.
 const int to_possibilites = (npoints - 2) * (npoints - 1) / 2;
 const int distarr_n = npoints * (npoints - 1) / 2;
 FILE *fp = NULL;
@@ -51,17 +48,10 @@ float distarray[npoints * npoints];
 float bestdist = FLT_MAX;
 
 int Path[npoints + 1];
+cublasHandle_t cublasHandle;
+cublasStatus_t cublasStatus;
 
-/*
-void init() {
-	distmatrix = (float**)malloc(npoints * sizeof(float*));
-	vnnmatrix = (float**)malloc(npoints * sizeof(float*));
-	for (int j = 0; j < npoints; j++) {
-		distmatrix[j] = (float*)malloc(npoints * sizeof(float));
-		vnnmatrix[j] = (float*)malloc(npoints * sizeof(float));
-	}
-}
-*/
+vector<float> distances;
 
 void PrintMatrix() {
 	for (int i = 0; i < npoints; i++) {
@@ -213,6 +203,20 @@ void IHCGraph() {
 	}
 }
 
+void DistGraph() {
+	string GnuCommands4[] = { "set title \"IHC " + to_string(bestdist) + "\"", "plot 'data4.tmp' pointtype 7 with linespoints" };
+	fp = fopen("data4.tmp", "w");
+	gnupipe = _popen("gnuplot -persistent", "w");
+
+	for (int i = 0; i < size(distances); i++) {
+		fprintf(fp, "%i %f\n", i, distances[i]);
+	}
+
+	for (int i = 0; i < 2; i++) {
+		fprintf(gnupipe, "%s\n", GnuCommands4[i].c_str());
+	}
+}
+
 
 void vnn(point points[]) {
 	Path[0] = List[0].number;
@@ -233,7 +237,7 @@ void vnn(point points[]) {
 }
 
 int GetThreadcount() {
-	if (npoints < 1025) {
+	if (to_possibilites < 1025) {
 		return (npoints - 1);
 	} 
 	else {
@@ -247,13 +251,15 @@ int GetThreadcount() {
 
 void IHC() {
 	int j = 0;
-	while (j < 1000) {
+	while (j < 10000) {
 		int BestNewPath[npoints + 1];
 		float BestNewDist = FLT_MAX;
 		int bestvalue[2];
 
-		for (int i = 1; i < npoints - 1; i++) {
-			for (int k = i + 1; k < npoints; k++) {
+		//for (int i = 1; i < npoints - 1; i++) {
+		for (int i = npoints - 2; i > 1; i--) {
+			//for (int k = i + 1; k < npoints; k++) {
+			for (int k = npoints -1; k > i + 1; k--) {
 				float dist = bestdist - distmatrix[Path[i - 1]][Path[i]] - distmatrix[Path[k]][Path[k + 1]];
 				dist += distmatrix[Path[i - 1]][Path[k]] + distmatrix[Path[i]][Path[k + 1]];
 
@@ -268,10 +274,10 @@ void IHC() {
 		if (BestNewDist != FLT_MAX) {
 			two_opt(bestvalue[0], bestvalue[1]);
 			bestdist = BestNewDist;
-			
+			distances.push_back(BestNewDist);
 		}
 		else {
-			cout << " done" << " " << j;
+			cout << "linear done" << " " << j;
 			break;
 
 		}
@@ -304,7 +310,7 @@ void IHC_parallel() {
 			bestdist = BestNewDist;
 		}
 		else {
-			cout << " done" << " " << j;
+			cout << "CPU done" << " " << j;
 			break;
 		}
 		j++;
@@ -356,46 +362,16 @@ void IHC_CUDA() {
 	int* d_Path;
 	cudaMalloc(&d_Path, bytes_path);
 
-	cublasHandle_t cublasHandle;
-	cublasStatus_t cublasStatus = cublasCreate(&cublasHandle);
+	
+	//const clock_t begin3 = clock();
 
 	int j = 0;
-	while (j < 500) {
+	while (j < 1000) {
 
 		
 		cudaMemcpy(d_Path, Path, bytes_path, cudaMemcpyHostToDevice);
 
 		GPU_parallel<<<BLOCKS, THREADS>>>(d_Path, npoints, d_results, bestdist, d_matrix, d_variablesi, d_variablesk);	
-		
-		/*
-		cudaMemcpy(results, d_results, bytes_variables, cudaMemcpyDeviceToHost);
-		float* bestvalue = std::min_element(std::begin(results), std::end(results));
-		int bestindex = std::distance(std::begin(results), bestvalue);
-		
-		if (bestvalue[0] < bestdist) {
-			two_opt(variablesi[bestindex], variablesk[bestindex]);
-			bestdist = bestvalue[0];
-		}
-		else {
-			cout << " done" << " " << j;
-			break;
-		}
-		
-		
-		thrust::device_ptr<float> g_ptr = thrust::device_pointer_cast(d_results);
-		int bestindex = thrust::min_element(g_ptr, g_ptr + to_possibilites) - g_ptr;
-		float bestvalue = *(g_ptr + bestindex);
-
-		if (bestvalue < bestdist) {
-			two_opt(variablesi[bestindex], variablesk[bestindex]);
-			bestdist = bestvalue;
-		}
-		else {
-			cout << " done" << " " << j;
-			break;
-		}
-		*/
-
 
 		int index = 0;
 		cublasIsamin(cublasHandle, to_possibilites, d_results, 1, &index);
@@ -407,15 +383,17 @@ void IHC_CUDA() {
 		if (dist < bestdist) {
 			two_opt(variablesi[index], variablesk[index]);
 			bestdist = dist;
+			distances.push_back(dist);
 		}
 		else {
-			cout << " done" << " " << j;
+			cout << "GPU done" << " " << j;
 			break;
 		}
 		
 		j++;
 	}
 
+	//cout << "\nTime taken for " << npoints << " in GPU parallel: " << float(clock() - begin3) / CLOCKS_PER_SEC;
 	cudaFree(d_matrix);
 	cudaFree(d_listx);
 	cudaFree(d_listy);
@@ -430,47 +408,60 @@ void IHC_CUDA() {
 
 
 int main() {
-	
-	//init();
 	PopulateList();
-	
 	
 	MakeDistMatrix();
 
-
 	
+	for (int i = 0; i < (npoints + 1); i++) {
+		Path[i] = i;
+	}
+	Path[npoints] = 0;
+	
+
 	//Graph();
 	//bestdist = CalcDistPath(Path);
-	vnn(List);
+	
 	//VNNGraph();
 	FillVariables();
 	
-	
-	// LINEAR
-	bestdist = CalcDistPath3(Path);
-	const clock_t begin = clock();
-	IHC();
-	cout << "\nTime taken for " << npoints << " in linear: " << float(clock() - begin) / CLOCKS_PER_SEC;
-	IHCGraph();
-	
-	
-	// PARALLEL CPU
-	vnn(List);
-	bestdist = CalcDistPath3(Path);
-	const clock_t begin2 = clock();
-	IHC_parallel();
-	cout << "\nTime taken for " << npoints << " in CPU parallel: " << float(clock() - begin2) / CLOCKS_PER_SEC;
-	IHCGraph();
-	
+	//for (int i = 0; i < 10; i++){
+	//	cout << "\n" << "ITERATION " << i << "\n";
+		
+		// LINEAR
+		//vnn(List);
+		//VNNGraph();
+		
+		
+		bestdist = CalcDistPath3(Path);
+		const clock_t begin = clock();
+		IHC();
+		cout << "\nTime taken for " << npoints << " in linear: " << float(clock() - begin) / CLOCKS_PER_SEC;
+		//IHCGraph();
+		DistGraph();
+		
+		/*
+		// PARALLEL CPU
+		vnn(List);
+		bestdist = CalcDistPath3(Path);
+		const clock_t begin2 = clock();
+		IHC_parallel();
+		cout << "\nTime taken for " << npoints << " in CPU parallel: " << float(clock() - begin2) / CLOCKS_PER_SEC;
+		//IHCGraph();
+		
 
-	
-	// PRALLEL GPU
-	vnn(List);
-	bestdist = CalcDistPath3(Path);
-
-	const clock_t begin3 = clock();
-	IHC_CUDA();
-	cout << "\nTime taken for " << npoints << " in GPU parallel: " << float(clock() - begin3) / CLOCKS_PER_SEC;
-	IHCGraph();
-	
+		
+		// PRALLEL GPU
+		int* d_test;
+		cudaMalloc(&d_test, sizeof(int)); // init gpu
+		cublasStatus = cublasCreate(&cublasHandle); // this take about .7s
+		//vnn(List);
+		bestdist = CalcDistPath3(Path);
+		const clock_t begin3 = clock();
+		IHC_CUDA();
+		cout << "\nTime taken for " << npoints << " in GPU parallel: " << float(clock() - begin3) / CLOCKS_PER_SEC;
+		//IHCGraph();
+		DistGraph();
+		*/
+	//}
 }
