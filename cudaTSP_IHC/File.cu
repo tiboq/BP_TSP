@@ -1,6 +1,7 @@
 #include <cuda_runtime.h>
 #include <cstdlib>
 #include <iostream>
+#include <fstream>
 #include <ctime>
 #include <cmath>
 #include <stdio.h>
@@ -22,10 +23,11 @@ using namespace concurrency;
 using namespace std;
 
 
-const float boxsize = 100.f;
-const int npoints = 500; //GPU parallel broken past 1025 points.
+const float boxsize = 10.f;
+const int npoints = 280; //GPU parallel broken past 1025 points.
 const int to_possibilites = (npoints - 2) * (npoints - 1) / 2;
 const int distarr_n = npoints * (npoints - 1) / 2;
+const float approxdist = 0.765 * sqrt(npoints * boxsize * boxsize);
 FILE *fp = NULL;
 FILE *gnupipe = NULL;
 
@@ -73,6 +75,15 @@ void RandomCoordinate(point * a, int number) {
 	a->number = number;
 }
 
+void SetCoordinate(point * a, int number, float x, float y) {
+	Listx[number] = x;
+	Listy[number] = y;
+	a->x = x;
+	a->y = y;
+	a->number = number;
+}
+
+
 float CalcDist(point point1, point point2) {
 	return sqrt(pow(point2.x - point1.x, 2) + pow(point2.y - point1.y, 2));
 }
@@ -102,7 +113,9 @@ float CalcDistPath3(int* Path2) {
 void FillVariables() {
 	int j = 0;
 	for (int i = 1; i < npoints - 1; i++) {
+	//for (int i = npoints - 2; i > 0; i--) {
 		for (int k = i + 1; k < npoints; k++) {
+		//for (int k = npoints -1; k > i; k--) {
 			variables[j][0] = i;
 			variables[j][1] = k;
 			variablesi[j] = i;
@@ -204,13 +217,16 @@ void IHCGraph() {
 }
 
 void DistGraph() {
-	string GnuCommands4[] = { "set title \"IHC " + to_string(bestdist) + "\"", "plot 'data4.tmp' pointtype 7 with linespoints" };
+
+	string GnuCommands4[] = { "set title \"IHC " + to_string(bestdist) + "\"", "plot 'data4.tmp' pointtype 7 with linespoints\n replot " + to_string(approxdist) };
 	fp = fopen("data4.tmp", "w");
 	gnupipe = _popen("gnuplot -persistent", "w");
 
 	for (int i = 0; i < size(distances); i++) {
 		fprintf(fp, "%i %f\n", i, distances[i]);
 	}
+	//fprintf(fp, "%s\n", "plot 20");
+
 
 	for (int i = 0; i < 2; i++) {
 		fprintf(gnupipe, "%s\n", GnuCommands4[i].c_str());
@@ -263,18 +279,30 @@ void IHC() {
 				float dist = bestdist - distmatrix[Path[i - 1]][Path[i]] - distmatrix[Path[k]][Path[k + 1]];
 				dist += distmatrix[Path[i - 1]][Path[k]] + distmatrix[Path[i]][Path[k + 1]];
 
-				if (dist < bestdist) {
+				if ((dist < bestdist) && (bestdist - dist) > 0.00002f) { //prevent rounding error
 					bestvalue[0] = i;
 					bestvalue[1] = k;
 
 					BestNewDist = dist;
+
+					///*
+					two_opt(bestvalue[0], bestvalue[1]);
+					bestdist = BestNewDist;
+					distances.push_back(BestNewDist);
+
+					i = 1;
+					k = 2;
+					//*/
+					
 				}
 			}
 		}
 		if (BestNewDist != FLT_MAX) {
+			/*
 			two_opt(bestvalue[0], bestvalue[1]);
 			bestdist = BestNewDist;
 			distances.push_back(BestNewDist);
+			*/
 		}
 		else {
 			cout << "linear done" << " " << j;
@@ -296,7 +324,7 @@ void IHC_parallel() {
 			float dist = bestdist - distmatrix[Path[value[0] - 1]][Path[value[0]]] - distmatrix[Path[value[1]]][Path[value[1] + 1]];
 			dist +=	distmatrix[Path[value[0] - 1]][Path[value[1]]] + distmatrix[Path[value[0]]][Path[value[1] + 1]];
 
-			if (dist < bestdist) {
+			if ((dist < bestdist) && (bestdist - dist) > 0.00002f) {
 				bestvalue[0] = value[0];
 				bestvalue[1] = value[1];
 
@@ -380,10 +408,10 @@ void IHC_CUDA() {
 		float dist = bestdist - distarray[Path[variablesi[index] - 1] * npoints + Path[variablesi[index]]] - distarray[Path[variablesk[index]] * npoints + Path[variablesk[index] + 1]];
 		dist += distarray[Path[variablesi[index] - 1] * npoints + Path[variablesk[index]]] + distarray[Path[variablesi[index]] * npoints + Path[variablesk[index] + 1]];
 
-		if (dist < bestdist) {
+		if ((dist < bestdist) && (bestdist - dist) > 0.00002f) {
 			two_opt(variablesi[index], variablesk[index]);
 			bestdist = dist;
-			distances.push_back(dist);
+			//distances.push_back(dist);
 		}
 		else {
 			cout << "GPU done" << " " << j;
@@ -403,12 +431,43 @@ void IHC_CUDA() {
 	cudaFree(d_Path);
 }
 
+void readTSPLib() {
+	string line;
+	ifstream myfile("TSPlib/a280.tsp");
+	if (myfile.is_open())
+	{
+		while (getline(myfile, line))
+		{
+			line.erase(line.begin(), std::find_if(line.begin(), line.end(), std::bind1st(std::not_equal_to<char>(), ' ')));
+			string delimiter = " ";
+			int index = std::stoi(line.substr(0, line.find(delimiter))) - 1;
 
+			string line2 = line.substr(line.find(delimiter), line.size() - 1);
+			line2.erase(line2.begin(), std::find_if(line2.begin(), line2.end(), std::bind1st(std::not_equal_to<char>(), ' ')));
+			float x = std::stof(line2.substr(0, line2.find(delimiter)));
+
+			string line3 = line2.substr(line2.find(delimiter), line2.size() - 1);
+			line3.erase(line3.begin(), std::find_if(line3.begin(), line3.end(), std::bind1st(std::not_equal_to<char>(), ' ')));
+			float y = std::stof(line3.substr(0, line3.find(delimiter)));
+
+			SetCoordinate(&List[index], index, x, y);
+
+		}
+		myfile.close();
+	}
+	else cout << "Unable to open file";
+}
 
 
 
 int main() {
-	PopulateList();
+	
+	
+
+	readTSPLib();
+	
+	
+	//PopulateList();
 	
 	MakeDistMatrix();
 
@@ -419,25 +478,27 @@ int main() {
 	Path[npoints] = 0;
 	
 
-	//Graph();
+	Graph();
 	//bestdist = CalcDistPath(Path);
 	
 	//VNNGraph();
 	FillVariables();
 	
 	//for (int i = 0; i < 10; i++){
-	//	cout << "\n" << "ITERATION " << i << "\n";
-		
-		// LINEAR
-		//vnn(List);
-		//VNNGraph();
-		
+		//cout << "\n" << "ITERATION " << i << "\n";
 		
 		bestdist = CalcDistPath3(Path);
+		cout << bestdist;
+		// LINEAR
+		//vnn(List);
+		bestdist = CalcDistPath3(Path);
+		//VNNGraph();
+		
 		const clock_t begin = clock();
 		IHC();
-		cout << "\nTime taken for " << npoints << " in linear: " << float(clock() - begin) / CLOCKS_PER_SEC;
-		//IHCGraph();
+		//cout << "\nTime taken for " << npoints << " in linear: " << float(clock() - begin) / CLOCKS_PER_SEC;
+		cout << " " << float(clock() - begin) / CLOCKS_PER_SEC << "\t";
+		IHCGraph();
 		DistGraph();
 		
 		/*
@@ -446,22 +507,27 @@ int main() {
 		bestdist = CalcDistPath3(Path);
 		const clock_t begin2 = clock();
 		IHC_parallel();
-		cout << "\nTime taken for " << npoints << " in CPU parallel: " << float(clock() - begin2) / CLOCKS_PER_SEC;
+		//cout << "\nTime taken for " << npoints << " in CPU parallel: " << float(clock() - begin2) / CLOCKS_PER_SEC;
+		cout << " " << float(clock() - begin2) / CLOCKS_PER_SEC << "\t";
 		//IHCGraph();
 		
 
-		
+	
 		// PRALLEL GPU
 		int* d_test;
 		cudaMalloc(&d_test, sizeof(int)); // init gpu
 		cublasStatus = cublasCreate(&cublasHandle); // this take about .7s
-		//vnn(List);
-		bestdist = CalcDistPath3(Path);
+
 		const clock_t begin3 = clock();
+		MakeDistMatrix();
+		vnn(List);
+		bestdist = CalcDistPath3(Path);
+		
 		IHC_CUDA();
-		cout << "\nTime taken for " << npoints << " in GPU parallel: " << float(clock() - begin3) / CLOCKS_PER_SEC;
-		//IHCGraph();
-		DistGraph();
+		//cout << "\nTime taken for " << npoints << " in GPU parallel: " << float(clock() - begin3) / CLOCKS_PER_SEC;
+		cout << " " << float(clock() - begin3) / CLOCKS_PER_SEC << "\t";
+		IHCGraph();
+		//DistGraph();
 		*/
 	//}
 }
